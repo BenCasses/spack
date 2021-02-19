@@ -1,0 +1,378 @@
+########## new issues
+
+? does pavilion have a way of arbitrarily tagging tests as part of some group
+    we could have it check tests by name
+
+? called in to pavilion meeting to ask:
+    how do I remove a result from the log? (for spack test remove X)
+    response: you can't, but we'll make a ticket and add the feature
+
+v what if we need a host config
+    we don't appear to need one
+    hope we don't for now, ask Pavilion guys
+
+v no generic "spack test results"? must specify a spec?
+    yes
+
+v since all tests are named spack, results look confusing
+    if you name the stanza foo, the result looks like spack.foo
+
+v return or poll on results?
+    just return
+
+v what are the other (non --capability) tests, how do I run them
+    spack test run
+    spack test run [name]
+
+v which test do we want to run belonging to spec foo
+    the test named spack.yaml
+
+v make a spec have a subdir pavilion
+    with subdirs tests and test_src
+
+v   arg parsing issue:
+        spack test --capability -n foo bar
+        launches the test named foo belonging to bar
+        but
+        spack test --capability bar -n foo
+            fails, name=None, specs=['bar', '-n', 'foo']
+        this is a known limitation from using argparse
+
+########## old issues to keep in mind
+
+DON'T FORGET issues here should be for tests, not the applications being tested
+
+install process for pavilion isn't just clone & make
+
+pavilion2 assumes python3 and bash
+
+tests must live in the tests and test_src sub-directories
+
+need to create hosts/[system].yaml
+    and we must export sys_name=[system]
+    how do we know max nodes in a given system
+
+need to write a scheduler plugin for every scheduler or we just go with RAW
+    scheduler: slurm
+    slurm:   <------not abstract
+        partition: user
+        qos: user
+
+Pavilion assumes everything is starting from a clean system state in regards to modules
+    so we have to clean the module environment first
+    modules must have the correct names
+        maybe module wrappers will help here
+
+in scheduler section, nodes: 2-all how can I be more complex?
+
+All Pavilion (non-structural) test config values are interpreted as strings.
+    so we can't do math or sneaky eval(...) without a plugin
+    how do we call out a plugin?
+
+########## installing pavilion2
+
+source at : https://github.com/hpc/pavilion2
+install notes at : https://pavilion2.readthedocs.io/en/latest/
+
+git clone https://github.com/hpc/pavilion2
+cd pavilion2
+git checkout 2.1
+git submodule update --init --recursive
+
+current pavilion2 install moved to ~/temp/_pavilion
+export PATH=$PATH:/g/g0/casses1/temp/pavilion/src/pavilion2/bin
+export PAV_CONFIG_DIR=/g/g0/casses1/temp/pavilion/config
+    tests live in ${PAV_CONFIG_DIR}/tests
+cd somedir/tests (like /g/g0/casses1/temp/tests)
+vi mytest.yaml
+pav show tests
+pav run [sometest]
+pav log run [#]
+pav results
+
+
+######## spack
+
+manual at https://spack.readthedocs.io/en/latest/
+
+git clone https://github.com/spack/spack
+cd spack
+git checkout remotes/origin/features/spack-test
+
+cd /g/g0/casses1/temp/spack
+. share/spack/setup-env.sh
+export SPACK_ROOT=$(pwd)
+export PATH=${SPACK_ROOT}/bin:$PATH
+spack edit -c test.
+    or
+    vi /g/g0/casses1/temp/spack/lib/spack/spack/cmd/test.py
+    see
+    vi lib/spack/spack/test/cmd/find.py
+    for invocation of the find command
+
+#experimental spec (saved to spack_save)
+./var/spack/repos/builtin/packages/casses 
+ssh://git@cz-bitbucket.llnl.gov:7999/~casses1/casses-spack-test.git
+
+# supported commands 
+spack list casses # is it installable
+spack find casses # is it installed
+spack install casses # install it
+    spack uninstall casses 
+    spack uninstall pavilion2
+spack install another # install it
+
+spack test list # show all
+spack test list casses
+spack test list raw spack
+    # if it matches a test, you only see the test
+    # if it matches a package, you see all of its tests
+spack test list foo
+
+spack test run # still seems to work
+spack test run --capability # runs everybody's "spack" test
+    # will install pavilion2 if its not there
+spack test run --capability casses 
+spack test run --capability -n another another
+spack test run --capability -n raw
+spack test run --capability foo
+spack test run --capability -n foo
+spack test run --capability -n foo casses
+
+spack test status # waiting for Pav, should == "all"
+spack test status casses
+# TODO tests casses not found even though latest test was helloraw.basic
+# TODO attach some metadata purpose to a test name so
+#   purpose A and purpose B can report distinct results for the same test
+spack test run --capability another; spack test status
+# TODO gave results for spack.casses not another even though another was most recent
+sleep 10; spack test status
+spack test status foo # ?
+
+spack test results
+# TODO spack.casses has FAIL ??
+spack test run --capability another; spack test results
+watch squeue # it has a sleep(20)
+spack test results # it failed
+
+spack test remove # broken
+# TODO needs to be done
+# TODO -a for all ? or list all that would be removed, do you really mean it?pushd ~/temp/other-spack-test
+# TODO require an exact name here?
+
+# TODO create /pavilion etc for tests as part of the package, make it a peer to package.py
+pushd ~/temp/other-spack-test
+ls -R
+vi pavilion/tests/spack.yaml 
+    # note hardcoded slurm
+    # note abstract launch command
+vi pavilion/tests/another.yaml 
+    # note raw scheduler, I think this ignores slurm section
+    # note results, looks at stdout, not RC, so it passes
+
+vi /g/g0/casses1/temp/spack/var/spack/repos/builtin/packages/casses/package.py
+    # note, have to recreate the pavilion directory
+    # for each package to pav test
+
+vi /g/g0/casses1/temp/spack/var/spack/repos/builtin/packages/pavilion2/package.py
+    # not much special here
+    
+vi /g/g0/casses1/temp/spack/lib/spack/spack/cmd/test.py     
+    # run parser is the only one that can take -n names and specs
+    # other parsers just want testnames, don't care if they match testnames or specnames
+    #
+    # some helper functions with _'s
+    #
+    # test_run
+    # /check_pav
+    # else: --> only tries if not smoke_test
+    # default name = spack
+    # nasty triple for loop to check
+    #   all names vs all tests in all packages
+    # can't make this run the same test twice
+    # 
+    # test_list
+    # weird list comprehensions here to match against all of a spec or individual tests
+    #
+    # test_status
+    # I don't feel good about the non-pav test check: os.path.exists(stage)
+    #   we can accidentally skip pavilion tests
+    # else if pav, get all results and filter them
+    # note, no status defers to smoke_test result: "==> Test ['foo'] completed"
+    #
+    # test_results
+    # some code duplication with status
+
+### older methods
+
+    pav results 
+    # check if Id increases from before spack test run, to quickly verify something ran
+    # need this to run pav ...
+    export PATH=$PATH:/g/g0/casses1/temp/pavilion/src/pavilion2/bin
+    export PAV_CONFIG_DIR=/g/g0/casses1/temp/pavilion/config
+    # try these to get the spack install
+    export PATH=$PATH:/g/g0/casses1/temp/spack/opt/spack/linux-rhel7-haswell/gcc-4.8.5/pavilion2-2.1.2-2e5k4rg3evocwliysmsobphxteea6avg/bin
+    export PAV_CONFIG_DIR=/g/g0/casses1/temp/spack/opt/spack/linux-rhel7-haswell/gcc-4.8.5/casses-1.0-edfitglezz4pbpsuyfp3c4dusbvm42jj/pavilion
+spack test status casses
+    # get running status of test casses
+    ? spack test status [nothing] # gets all stasuses?
+spack test results casses
+    # get results of completed test casses
+    ? spack test results [nothing]
+        # gets all results
+spack test remove casses
+    # delete the test record belonging to test casses
+    ?spack test remove [nothing]
+        # delete all test results
+spack test list [foo]
+    # show all packages with available tests named like foo
+    spack test list
+        # show all packages with available tests
+
+### modified files
+    # should be copied into ~/temp/spack_save
+/g/g0/casses1/temp/spack/lib/spack/spack/cmd/test.py
+    # for runing tests through spack and installing pavilion
+/g/g0/casses1/temp/spack/var/spack/repos/builtin/packages/casses
+    # hello world spack recipe (with a test) for testing the spack test command
+    # ssh://git@cz-bitbucket.llnl.gov:7999/~casses1/casses-spack-test.git
+/g/g0/casses1/temp/spack/var/spack/repos/builtin/packages/pavilion2
+    # spack install recipe for pavilion2
+    # https://github.com/hpc/pavilion2/archive/v2.1.2.tar.gz
+
+######## TODO
+    
+    tests now live in the package repo as a peer to package.py, not the app source repo
+        okay that pavilion executes them from there
+    search for another pavilion before installing
+    spack config content from greg for:
+        base pavilion location in case you have tests for another purpose, to point spack to it
+            and : include another location for specific tests
+        or :: override base location and only use this one
+    list
+        spack test list
+            shows all tests for all installed packages
+                (will eventually merge smoke and pav search)
+    find
+        spack test find foo
+            search test suites that satisfy spec foo for which status is available
+        spack test find -n foo
+            find test suites that ran a test containing foo in the name
+        spack test find
+            return all test suites for which status is available for any test
+        this is where we need metadata
+            so that a test named foo from 2 different sources can be differentiated
+        test suites are defined by a set of tests when launched
+
+    name of the test is [yaml file name].[yaml title]
+
+    metadata = hash of package followed by test name for all tests being run in that suite (sorted)
+        common case : all tests belonging to a new package
+        common case : all tests for all installed packages within a new spack environment
+
+    run
+        spack test run --capability
+            run all pavilion tests for which the app is installed
+        spack test run --capability foo
+            run all pavilion tests for packages that satisfy spec foo
+        spack test run --capability %gcc
+            run all pavilion tests for packages that satisfy spec %gcc
+        spack test run --capability -n foo
+            run all pavilion tests for all packages installed with foo in the name 
+        spack test run --capability -n foo bar
+            run all pavilion tests for installed package that satisfies spec bar with foo in the name 
+        spack test run --capability -n "foo bar" baz quiz
+            run all pavilion tests for installed packages that satisfy the spec baz or quiz
+                with bar or foo in the name 
+                satisfy the spec : baz%gcc
+        spack test run foo bar
+            run smoke tests from all installed specs that match foo or bar
+        spack test run --alias Greg foo bar
+            run smoke tests from all installed specs that match foo or bar, name the suite Greg
+
+    status
+        spack test status
+            get status for all tests within all suites
+        spack test status foo bar
+            get status for all tests within all suites where the name of the test suite matches foo or bar
+        spack test status -n foo bar
+            undefined
+
+    results
+        spack test results
+            get results for all tests within all suites
+        spack test results foo bar
+            get results for all tests within all suites where the name of the test suite matches foo or bar
+        spack test results -n foo bar
+            undefined
+
+    remove : confirm Y/N in all of them
+        spack test remove foo
+            remove tests for suites named foo
+        spack test remove -n foo
+            undefined
+        spack test remove
+            remove all tests for all suites 
+
+    set test environment when tests are called
+
+    check greg's test commands to make sure they aren't broken
+
+    spack test results only gets the "pav results" from the last test to run
+        MM'd Paul on this one
+        they're working on it
+
+    if spack test run --capabilty
+        runs all tests named spack belonging to all installed packages
+    then spack test status and spack test results
+        should also work for all tests
+
+    help on all commands
+
+    detect and deal with scheduler [X]
+
+    remove
+        Paul has a ticket open to add remove
+
+### a pavilion test, hello.yaml
+basic:
+    summary: mpi hello world
+    slurm:
+        num_nodes: 2
+        tasks_per_node: 2
+        partition: pbatch
+    scheduler: slurm
+    build:
+        modules: [gnu, openmpi-gnu]
+        source_location: mpi_hello
+        cmds:
+            - mpicc -o hello mpi_hello.c
+    run:
+        modules: [gnu, openmpi-gnu]
+        cmds:
+            - '{{sched.test_cmd}} ./hello'
+    results:
+        regex:
+            - key: result
+              regex: 'hello from.*'
+
+################ priorities
+
+1) get all results, not just most recent : need for both
+
+2) arbitrary tagging : need for both
+
+3) result remove : would like for both
+
+4) full abstraction, including scheduler : need for SWL, would like for spack
+
+5) arbitrary math (Pav issue 192, PR 222) : would really like for SWL, don't need for spack
+
+6) scaling (define fanout via arbitrary math) : need for SWL, don't need for spack
+
+
+
+
+
+
+
