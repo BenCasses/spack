@@ -11,16 +11,20 @@ import datetime
 import fnmatch
 import re
 import shutil
+import glob
 
 import llnl.util.tty as tty
 import llnl.util.filesystem as fs
 
-import spack.install_test
 import spack.environment as ev
 import spack.cmd
+import spack.cmd.find
+from spack.main import SpackCommand
 import spack.cmd.common.arguments as arguments
 import spack.report
 import spack.package
+
+from spack.util.executable import Executable
 
 description = "run spack's tests for an install"
 section = "administrator"
@@ -85,23 +89,60 @@ def setup_parser(subparser):
     # List
     list_parser = sp.add_parser('list', help=test_list.__doc__)
     list_parser.add_argument(
-        'filter', nargs=argparse.REMAINDER,
-        help='optional case-insensitive glob patterns to filter results.')
+        'testnames', nargs=argparse.REMAINDER,
+        help='optional test or spec names to narrow results.')
 
     # Status
     status_parser = sp.add_parser('status', help=test_status.__doc__)
-    status_parser.add_argument('name', help="Test for which to provide status")
+    status_parser.add_argument(
+        'testnames', nargs=argparse.REMAINDER,
+        help='optional test or spec names to narrow results.')
+
 
     # Results
     results_parser = sp.add_parser('results', help=test_results.__doc__)
-    results_parser.add_argument('name', help="Test for which to print results")
+    results_parser.add_argument(
+        'testnames', nargs=argparse.REMAINDER,
+        help='optional test or spec names to narrow results.')
 
     # Remove
     remove_parser = sp.add_parser('remove', help=test_remove.__doc__)
     remove_parser.add_argument(
-        'name', nargs='?',
-        help="Test to remove from test stage")
+        'testnames', nargs=argparse.REMAINDER,
+        help='optional test or spec names to narrow results.')
 
+# check for and install pavilion2
+# TODO use the database to see if any pavilion2 is installed
+#   spack.store.db.query("pavilion2")
+#   might have to make it a spec first
+# if not installed, use spack python cmd which to see if it exists at all
+# only install if neither
+def _install_pavilion():
+    pavspec = spack.spec.Spec('pavilion2').concretized()
+    pav_path = os.path.join(pavspec.prefix.bin, 'pav')
+    pavspec.package.do_install()
+    if not pavspec.package.installed or not os.path.exists(pav_path):
+        raise InstallError('Failed to install Pavilion 2')
+    return Executable(pav_path)
+
+# is pavilion2 installed?
+# TODO some repetition with the above
+def _check_pavilion():
+    pavspec = spack.spec.Spec('pavilion2').concretized()
+    pav_path = os.path.join(pavspec.prefix.bin, 'pav')
+    if pavspec.package.installed:
+        return Executable(pav_path)
+    else:
+        return None
+
+# get Pavilion2 tests from aspec 
+# TODO look in the dir with package.py
+def _get_pav_tests( aspec ):
+    if os.path.isdir(aspec.prefix.pavilion) and \
+       os.path.isdir(aspec.prefix.pavilion.tests) and \
+       os.path.isdir(aspec.prefix.pavilion.test_src):
+       return glob.glob(aspec.prefix.pavilion.tests + "/*.yaml" )
+    return []
 
 def test_run(args):
     """Run tests for the specified installed packages
@@ -109,6 +150,7 @@ def test_run(args):
     If no specs are listed, run tests for all packages in the current
     environment or all installed packages if there is no active environment.
     """
+
     # cdash help option
     if args.help_cdash:
         parser = argparse.ArgumentParser(
@@ -126,25 +168,23 @@ environment variables:
     if args.fail_fast:
         spack.config.set('config:fail_fast', True, scope='command_line')
 
+    # record test time; this will be default test name
+    now = datetime.datetime.now()
+    test_name = args.name or now.strftime('%Y-%m-%d_%H:%M:%S')
+    tty.msg("Spack test %s" % test_name)
+
     # Get specs to test
     env = ev.get_env(args, 'test')
     hashes = env.all_hashes() if env else None
 
-    specs = spack.cmd.parse_specs(args.specs) if args.specs else [None]
-    specs_to_test = []
-    for spec in specs:
-        matching = spack.store.db.query_local(spec, hashes=hashes)
-        if spec and not matching:
-            tty.warn("No installed packages match spec %s" % spec)
-        specs_to_test.extend(matching)
+    specs = spack.store.db.query_local(None, hashes=hashes)
 
-    # test_stage_dir
-    test_suite = spack.install_test.TestSuite(specs_to_test, args.name)
-    test_suite.ensure_stage()
-    tty.msg("Spack test %s" % test_suite.name)
+    # limit to specs containing the given spec names
+    if args.specs:
+        specs = [ s for s in specs if any([n in str(s) for n in args.specs])]
 
     # Set up reporter
-    setattr(args, 'package', [s.format() for s in test_suite.specs])
+    setattr(args, 'package', [s.format() for s in specs])
     reporter = spack.report.collect_info(
         spack.package.PackageBase, 'do_test', args.log_format, args)
     if not reporter.filename:
@@ -157,86 +197,153 @@ environment variables:
         else:
             log_file = os.path.join(
                 os.getcwd(),
-                'test-%s' % test_suite.name)
+                'test-%s' % test_name)
         reporter.filename = log_file
-    reporter.specs = specs_to_test
+    reporter.specs = specs
 
-    with reporter('test', test_suite.stage):
+    # test_stage_dir
+    stage = get_stage(test_name)
+    fs.mkdirp(stage)
+
+    with reporter('test', stage):
         if args.smoke_test:
-            test_suite(remove_directory=not args.keep_stage,
-                       dirty=args.dirty,
-                       fail_first=args.fail_first)
+            for spec in specs:
+                try:
+                    spec.package.do_test(
+                        name=test_name,
+                        remove_directory=not args.keep_stage,
+                        dirty=args.dirty)
+                    with open(_get_results_file(test_name), 'a') as f:
+                        f.write("%s PASSED\n" % spec.format("{name}-{version}-{hash:7}"))
+                except BaseException:
+                    with open(_get_results_file(test_name), 'a') as f:
+                        f.write("%s FAILED\n" % spec.format("{name}-{version}-{hash:7}"))
+                    if args.fail_first:
+                        break
         else:
-            raise NotImplementedError
+            pav = _check_pavilion()
+            if not pav:
+                pav = _install_pavilion()
 
+            if args.name:
+                testnames = args.name.split()
+            else:
+                testnames = ["spack"]
+
+            # TODO construct a list of tests to run
+            #   instead of not ranatest, check if list is empty
+            ranatest = None
+            for spec in specs:
+                tests = [ os.path.basename( t ).split(".")[0] for t in _get_pav_tests(spec) ]
+                for test in tests:
+                    for testname in testnames:
+# but only run a given test once
+# avoid running the same test twice in a row if it matches twice
+                        if testname in test and not ranatest == str(spec)+str(test):
+                            tty.msg("launching test \"" + test + "\" for " + str(spec))
+                            os.environ["PAV_CONFIG_DIR"] = spec.prefix.pavilion
+                            output = pav('run', test, output=str, error=str)
+                            ranatest = str(spec)+str(test)
+
+            if not ranatest:
+                if args.specs:
+                    specificnames = " named " + str(args.specs)
+                else:
+                    specificnames = ""
+                tty.msg(" could not find any Pavilion tests named " + str(testnames) + \
+                    " in installed specs" + specificnames)
 
 def test_list(args):
-    """List tests that are running or have available results."""
-    stage_dir = spack.install_test.get_test_stage_dir()
-    tests = os.listdir(stage_dir)
+    """List specs that have pavilion tests"""
+   
+    testnames = args.testnames
+    
+    env = ev.get_env(args, 'list')
+    hashes = env.all_hashes() if env else None
 
-    # Filter tests by filter argument
-    if args.filter:
-        def create_filter(f):
-            raw = fnmatch.translate('f' if '*' in f or '?' in f
-                                    else '*' + f + '*')
-            return re.compile(raw, flags=re.IGNORECASE)
-        filters = [create_filter(f) for f in args.filter]
+    specs = spack.store.db.query_local(None, hashes=hashes)
 
-        def match(t, f):
-            return f.match(t)
-        tests = [t for t in tests
-                 if any(match(t, f) for f in filters) and
-                 os.path.isdir(os.path.join(stage_dir, t))]
-
-    if tests:
-        # TODO: Make these specify results vs active
-        msg = "Spack test results available for the following tests:\n"
-        msg += "        %s\n" % ' '.join(tests)
-        msg += "    Run `spack test remove` to remove all tests"
-        tty.msg(msg)
-    else:
-        msg = "No test results match the query\n"
-        msg += "        Tests may have been removed using `spack test remove`"
-        tty.msg(msg)
-
+    for spec in specs:
+        tests = _get_pav_tests( spec )
+        if tests:
+            tests = [ os.path.basename( t ).split(".")[0] for t in tests ]
+            # if any of names are in the spec
+            # or any of names are in the individual tests
+            if not testnames or any( n in str(spec) for n in testnames) or \
+                any( n in t for t in tests for n in testnames):
+                #TODO eventually something like spec.format("{name}-{version}-{hash:7}")
+                #  instead of tty.msg(spec)
+                tty.msg( spec )
+                for t in tests:
+                    if not testnames or any( n in str(spec) for n in testnames) or \
+                        any( n in t for n in testnames):
+                            tty.msg( " " + t )
 
 def test_status(args):
     """Get the current status for a particular Spack test."""
-    name = args.name
-    stage = spack.install_test.get_test_stage(name)
 
-    if os.path.exists(stage):
-        # TODO: Make this handle capability tests too
-        tty.msg("Test %s completed" % name)
+    testnames = args.testnames
+    if testnames:
+        stage = get_stage(testnames[0])
+
+    pav = _check_pavilion()
+
+    if testnames and os.path.exists(stage):
+        tty.msg("Test %s completed" % testnames)
     else:
-        tty.msg("Test %s no longer available" % name)
-
+        if pav:
+            tests = pav('status', output=str, error=str).splitlines()[4:-1]
+            if testnames:
+                tests = [t for t in tests if any(n in t for n in testnames)]
+            if tests:
+                for t in tests:
+                    t_ = t.split("|")
+                    if t_[1].strip():
+                        tty.msg("Test %s has status %s" % ( t_[1], t_[2] ))
+            else:
+                tty.msg("Tests %s not found" % testnames)
+        else:
+            tty.msg("Test %s no longer available" % testnames)
 
 def test_results(args):
     """Get the results for a particular Spack test."""
-    name = args.name
-    stage = spack.install_test.get_test_stage(name)
 
-    # TODO: Make this handle capability tests too
+    testnames = args.testnames
+    if testnames:
+        stage = get_stage(testnames[0])
+
+    pav = _check_pavilion()
+
     # The results file may turn out to be a placeholder for future work
-    if os.path.exists(stage):
-        results_file = spack.install_test.get_results_file(name)
+    if testnames and os.path.exists(stage):
+        results_file = _get_results_file(testnames)
         if os.path.exists(results_file):
-            msg = "Results for test %s: \n" % name
+            msg = "Results for test %s: \n" % testnames
             with open(results_file, 'r') as f:
                 lines = f.readlines()
             for line in lines:
                 msg += "        %s" % line
             tty.msg(msg)
         else:
-            msg = "Test %s has no results.\n" % name
+            msg = "Test %s has no results.\n" % testnames
             msg += "        Check if it is active with "
-            msg += "`spack test status %s`" % name
+            msg += "`spack test status %s`" % testnames
             tty.msg(msg)
     else:
-        tty.msg("No test %s found in test stage" % name)
-
+        if pav:
+            tests = pav('results', output=str, error=str)
+            tests = tests.splitlines()[4:-1]
+            if testnames:
+                tests = [t for t in tests if any(n in t for n in testnames)]
+            if tests:
+                for t in tests:
+                    t_ = t.split("|")
+                    tty.msg("Test %s has result %s" % ( t_[0], t_[2] ))
+            else:
+                tty.msg("No tests %s found" % testnames)
+        else:
+            tty.msg("No test %s found in test stage" % testnames)
+# TODO eventually, testnames will be the metadata added from notes
 
 def test_remove(args):
     """Remove results for a test from the test stage.
@@ -245,11 +352,28 @@ def test_remove(args):
 
     Removed tests can no longer be accessed for results or status, and will not
     appear in `spack test list` results."""
+    stage_dir = get_stage(args.name)
     if args.name:
-        shutil.rmtree(spack.install_test.get_test_stage(args.name))
+        shutil.rmtree(stage_dir)
     else:
-        fs.remove_directory_contents(spack.install_test.get_test_stage_dir())
+        fs.remove_directory_contents(stage_dir)
 
 
 def test(parser, args):
     globals()['test_%s' % args.test_command](args)
+
+
+def get_stage(name=None):
+    """
+    Return the test stage for the named test or the overall test stage.
+    """
+    stage_dir = spack.util.path.canonicalize_path(
+        spack.config.get('config:test_stage', '~/.spack/test'))
+    return os.path.join(stage_dir, name) if name else stage_dir
+
+def _get_results_file(name):
+    """
+    Return the results file for the named test.
+    """
+    stage = get_stage(name)
+    return os.path.join(stage, 'results.txt')
